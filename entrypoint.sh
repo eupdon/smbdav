@@ -4,9 +4,11 @@ set -e
 BASE_DIR="/srv/share"
 mkdir -p "$BASE_DIR"
 
+mkdir -p /etc/caddy /etc/samba
+
 # Caddyfile 및 smb.conf 초기 설정 생성
 echo -e "{\n    order webdav before file_server\n}\n\nhttp://:80 {\n    root * $BASE_DIR" > /etc/caddy/Caddyfile
-echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/caddy/smb.conf
+echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/samba/smb.conf
 
 # 1부터 10까지 유저 탐색
 for i in $(seq 1 10); do
@@ -35,10 +37,10 @@ for i in $(seq 1 10); do
 
         echo -e "\n    handle /$FOLDER/* {\n        basicauth {\n            $USERNAME $HASHED_PASS\n        }\n        webdav\n    }" >> /etc/caddy/Caddyfile
         
-        if grep -q "\[$FOLDER\]" /etc/caddy/smb.conf; then
-            sed -i "/valid users =/s/$/ $USERNAME/" /etc/caddy/smb.conf
+        if grep -q "\[$FOLDER\]" /etc/samba/smb.conf; then
+            sed -i "/valid users =/s/$/ $USERNAME/" /etc/samba/smb.conf
         else
-            echo -e "\n[$FOLDER]\n    path = $TARGET_DIR\n    writable = yes\n    valid users = $USERNAME\n    force create mode = 0777\n    force directory mode = 0777" >> /etc/caddy/smb.conf
+            echo -e "\n[$FOLDER]\n    path = $TARGET_DIR\n    writable = yes\n    valid users = $USERNAME\n    force create mode = 0777\n    force directory mode = 0777" >> /etc/samba/smb.conf
         fi
     done
 done
