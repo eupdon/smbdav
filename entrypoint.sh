@@ -2,7 +2,7 @@
 set -e
 
 BASE_DIR="/srv/share"
-USER_HOMES="/srv/users" # 유저별 개인 루트 공간 생성용
+USER_HOMES="/srv/users"
 mkdir -p "$BASE_DIR" "$USER_HOMES"
 mkdir -p /etc/caddy /etc/samba
 
@@ -34,6 +34,7 @@ for i in $(seq 1 10); do
     
     # 유저별 개인 가상 루트 디렉토리 생성
     U_HOME="$USER_HOMES/$USERNAME"
+    rm -rf "$U_HOME" # 기존 가상 폴더 흔적 초기화
     mkdir -p "$U_HOME"
 
     # 폴더별 접근 권한 매핑 기록 및 심볼릭 링크 연결
@@ -43,39 +44,16 @@ for i in $(seq 1 10); do
         chmod 777 "$TARGET_DIR"
         echo "$FOLDER:$USERNAME" >> /tmp/folder_mappings.txt
 
-        # 유저 홈 디렉토리 내부에 권한이 있는 실제 폴더를 바로가기(링크)로 연결
+        # 유저 가상 홈 내부에 권한이 있는 실제 폴더 링크 연결
         ln -sf "$TARGET_DIR" "$U_HOME/$FOLDER"
     done
 done
 
-# 2. Caddyfile 생성 시작
-# 지시어 순서에 webdav와 file_server를 명시합니다.
+# 2. Caddyfile 구조적 결함 수정본 작성
 echo -e "{\n    order webdav before file_server\n}\n\nhttp://:80 {" > /etc/caddy/Caddyfile
 
-# 3. 유저별 루트 WebDAV 환경 구성
-# 루트 상태로 진입하면 각 유저의 아이디를 식별해 해당 유저의 가상 홈(/srv/users/유저명)을 WebDAV로 보여줍니다.
-if [ -f /tmp/user_hashes.txt ]; then
-    while read -r LINE; do
-        UNAME=$(echo "$LINE" | cut -d':' -f1)
-        U_HASH=$(echo "$LINE" | cut -d':' -f2-)
-        
-        echo -e "\n    # $UNAME 전용 가상 루트 및 하위 폴더 처리" >> /etc/caddy/Caddyfile
-        echo "    @auth_$UNAME {" >> /etc/caddy/Caddyfile
-        echo "        expression {http.auth.user} == '$UNAME'" >> /etc/caddy/Caddyfile
-        echo "    }" >> /etc/caddy/Caddyfile
-        
-        echo "    handle @auth_$UNAME {" >> /etc/caddy/Caddyfile
-        echo "        root * $USER_HOMES/$UNAME" >> /etc/caddy/Caddyfile
-        echo "        basicauth {" >> /etc/caddy/Caddyfile
-        echo "            $UNAME $U_HASH" >> /etc/caddy/Caddyfile
-        echo "        }" >> /etc/caddy/Caddyfile
-        echo "        webdav" >> /etc/caddy/Caddyfile
-        echo "    }" >> /etc/caddy/Caddyfile
-    done < /tmp/user_hashes.txt
-fi
-
-# 기본 인증 요구 (기본적으로 들어올 때 누군지 알아야 하므로 루트 레벨에 인증 배치)
-echo -e "\n    basicauth {" >> /etc/caddy/Caddyfile
+# 전체 루트 통합 단일 basicauth 적용 (인증은 여기서 딱 1번만 처리)
+echo "    basicauth {" >> /etc/caddy/Caddyfile
 if [ -f /tmp/user_hashes.txt ]; then
     while read -r LINE; do
         UNAME=$(echo "$LINE" | cut -d':' -f1)
@@ -85,11 +63,13 @@ if [ -f /tmp/user_hashes.txt ]; then
 fi
 echo -e "    }\n" >> /etc/caddy/Caddyfile
 
-# 예외 처리 닫기
-echo -e "    handle {\n        respond \"Unauthorized\" 401\n    }\n}" >> /etc/caddy/Caddyfile
+# [핵심 수정] 로그인에 성공한 ID 변수({http.auth.user})를 추적해 가상 홈으로 루트 경로 다이렉트 매핑
+echo "    root * /srv/users/{http.auth.user}" >> /etc/caddy/Caddyfile
+echo "    webdav" >> /etc/caddy/Caddyfile
+echo "}" >> /etc/caddy/Caddyfile
 
 
-# 4. smb.conf 조립 (기존 기능 유지)
+# 3. smb.conf 조립 (기존 기능 유지)
 echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/samba/smb.conf
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
