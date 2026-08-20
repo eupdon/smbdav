@@ -1,10 +1,9 @@
 FROM caddy:2-builder AS builder
-RUN xcaddy build --with github.com/mholt/caddy-webdav
+RUN xcaddy build --with ://github.com
 
 FROM debian:bookworm-slim
 
-# 필요한 패키지 (Samba, Supervisor, Caddy 구동용 필수 도구) 설치
-RUN apt-get update && apt-get install -y --no-install-recommens \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     samba \
     smbclient \
     supervisor \
