@@ -1,5 +1,5 @@
 FROM caddy:2-builder AS builder
-RUN xcaddy build --with ://github.com
+RUN xcaddy build --with github.com/mholt/caddy-webdav
 
 FROM debian:bookworm-slim
 
