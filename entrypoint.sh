@@ -31,8 +31,7 @@ for i in $(seq 1 10); do
     HASHED_PASS=$(caddy hash-password --plaintext "$PASS")
     echo "$USERNAME:$HASHED_PASS" >> /tmp/user_hashes.txt
     
-    # [핵심] 유저 이름으로 된 가상 폴더(/srv/users/유저명)를 만드는 코드를 완전히 삭제했습니다!
-    # 오직 실제 공유할 폴더들만 베이스 디렉토리에 생성합니다.
+    # 실제 공유할 폴더 생성 및 권한 매핑 기록
     for FOLDER in $FOLDERS; do
         TARGET_DIR="$BASE_DIR/$FOLDER"
         mkdir -p "$TARGET_DIR"
@@ -44,7 +43,7 @@ done
 # 2. Caddyfile 생성
 echo -e "{\n    order webdav before file_server\n}\n\nhttp://:80 {" > /etc/caddy/Caddyfile
 
-# 전체 루트에 단일 basicauth 적용 (로그인 창은 단 1번만 팝업)
+# 전체 루트에 단일 basicauth 적용
 echo "    basicauth {" >> /etc/caddy/Caddyfile
 if [ -f /tmp/user_hashes.txt ]; then
     while read -r LINE; do
@@ -55,34 +54,28 @@ if [ -f /tmp/user_hashes.txt ]; then
 fi
 echo -e "    }\n" >> /etc/caddy/Caddyfile
 
-# 최상위 루트 경로는 무조건 실제 데이터 저장소인 /srv/share를 바라봅니다.
-# (이로 인해 최상위에는 folder1, folder2 같은 실제 폴더들만 존재하게 됩니다)
+# 최상위 루트 경로는 무조건 실제 데이터 저장소 지정
 echo "    root * $BASE_DIR" >> /etc/caddy/Caddyfile
 
-# 3. 하위 폴더별로 접근 권한이 있는 유저만 진입할 수 있도록 방어벽 구성
+# 3. [핵심 수정] Caddy 내장 vars 매처를 이용해 에러 없는 완벽한 다중 권한 제어 필터 구축
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
         USERS_FOR_FOLDER=$(grep "^$FOLDER:" /tmp/folder_mappings.txt | cut -d':' -f2)
         
-        # 권한 유저 검증 조건문 생성
-        EXPR=""
-        for UNAME in $USERS_FOR_FOLDER; do
-            if [ -z "$EXPR" ]; then
-                EXPR="http.auth.user.id == '$UNAME'"
-            else
-                EXPR="$EXPR || http.auth.user.id == '$UNAME'"
-            fi
-        done
-
-        # 해당 폴더 경로로 들어왔을 때 조건 검사
+        # 해당 폴더 경로 블록 선언
         echo "    handle /$FOLDER/* {" >> /etc/caddy/Caddyfile
-        echo "        @listens expression $EXPR" >> /etc/caddy/Caddyfile
-        echo "        handle @listens {" >> /etc/caddy/Caddyfile
-        echo "            @browser method GET HEAD" >> /etc/caddy/Caddyfile
-        echo "            file_server @browser browse" >> /etc/caddy/Caddyfile
-        echo "            webdav" >> /etc/caddy/Caddyfile
-        echo "        }" >> /etc/caddy/Caddyfile
-        # 권한이 없는 유저가 주소를 직접 치고 들어오면 국물도 없이 거부(Forbidden)
+        
+        # 권한이 있는 유저마다 각각 vars 매처와 내부 핸들러 매핑 (중복 매칭 가능)
+        for UNAME in $USERS_FOR_FOLDER; do
+            echo "        @allowed_$UNAME vars {http.auth.user.id} $UNAME" >> /etc/caddy/Caddyfile
+            echo "        handle @allowed_$UNAME {" >> /etc/caddy/Caddyfile
+            echo "            @browser method GET HEAD" >> /etc/caddy/Caddyfile
+            echo "            file_server @browser browse" >> /etc/caddy/Caddyfile
+            echo "            webdav" >> /etc/caddy/Caddyfile
+            echo "        }" >> /etc/caddy/Caddyfile
+        done
+        
+        # 위 필터들(vars) 중 그 어디에도 해당하지 않는 타인 계정은 일괄 거부(Forbidden)
         echo "        handle {" >> /etc/caddy/Caddyfile
         echo "            respond \"Forbidden\" 403" >> /etc/caddy/Caddyfile
         echo "        }" >> /etc/caddy/Caddyfile
@@ -100,7 +93,7 @@ echo "    }" >> /etc/caddy/Caddyfile
 echo -e "\n    handle {\n        respond \"Not Found\" 404\n    }\n}" >> /etc/caddy/Caddyfile
 
 
-# 4. smb.conf 조립 (기존 정상 스펙 유지)
+# 4. smb.conf 조립 (기존 기능 유지)
 echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/samba/smb.conf
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
