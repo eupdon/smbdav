@@ -2,15 +2,14 @@
 set -e
 
 BASE_DIR="/srv/share"
-USER_HOMES="/srv/users"
-mkdir -p "$BASE_DIR" "$USER_HOMES"
+mkdir -p "$BASE_DIR"
 mkdir -p /etc/caddy /etc/samba
 
 # 유저 데이터 수집을 위한 임시 파일 초기화
 > /tmp/user_hashes.txt
 > /tmp/folder_mappings.txt
 
-# 1. 모든 환경변수를 돌며 유저 생성 및 인증 정보 수집
+# 1. 모든 환경변수를 돌며 시스템/SMB 유저 생성 및 권한 매핑 수집
 for i in $(seq 1 10); do
     eval USER=\$USER$i
     eval PASS=\$PASS$i
@@ -32,27 +31,20 @@ for i in $(seq 1 10); do
     HASHED_PASS=$(caddy hash-password --plaintext "$PASS")
     echo "$USERNAME:$HASHED_PASS" >> /tmp/user_hashes.txt
     
-    # 유저별 개인 가상 루트 디렉토리 생성
-    U_HOME="$USER_HOMES/$USERNAME"
-    rm -rf "$U_HOME" # 기존 가상 폴더 흔적 초기화
-    mkdir -p "$U_HOME"
-
-    # 폴더별 접근 권한 매핑 기록 및 심볼릭 링크 연결
+    # [핵심] 유저 이름으로 된 가상 폴더(/srv/users/유저명)를 만드는 코드를 완전히 삭제했습니다!
+    # 오직 실제 공유할 폴더들만 베이스 디렉토리에 생성합니다.
     for FOLDER in $FOLDERS; do
         TARGET_DIR="$BASE_DIR/$FOLDER"
         mkdir -p "$TARGET_DIR"
         chmod 777 "$TARGET_DIR"
         echo "$FOLDER:$USERNAME" >> /tmp/folder_mappings.txt
-
-        # 유저 가상 홈 내부에 권한이 있는 실제 폴더 링크 연결
-        ln -sf "$TARGET_DIR" "$U_HOME/$FOLDER"
     done
 done
 
-# 2. Caddyfile 구조적 결함 수정본 작성
+# 2. Caddyfile 생성
 echo -e "{\n    order webdav before file_server\n}\n\nhttp://:80 {" > /etc/caddy/Caddyfile
 
-# 전체 루트 통합 단일 basicauth 적용 (인증은 여기서 딱 1번만 처리)
+# 전체 루트에 단일 basicauth 적용 (로그인 창은 단 1번만 팝업)
 echo "    basicauth {" >> /etc/caddy/Caddyfile
 if [ -f /tmp/user_hashes.txt ]; then
     while read -r LINE; do
@@ -63,13 +55,52 @@ if [ -f /tmp/user_hashes.txt ]; then
 fi
 echo -e "    }\n" >> /etc/caddy/Caddyfile
 
-# [핵심 수정] 로그인에 성공한 ID 변수({http.auth.user})를 추적해 가상 홈으로 루트 경로 다이렉트 매핑
-echo "    root * /srv/users/{http.auth.user}" >> /etc/caddy/Caddyfile
-echo "    webdav" >> /etc/caddy/Caddyfile
-echo "}" >> /etc/caddy/Caddyfile
+# 최상위 루트 경로는 무조건 실제 데이터 저장소인 /srv/share를 바라봅니다.
+# (이로 인해 최상위에는 folder1, folder2 같은 실제 폴더들만 존재하게 됩니다)
+echo "    root * $BASE_DIR" >> /etc/caddy/Caddyfile
+
+# 3. 하위 폴더별로 접근 권한이 있는 유저만 진입할 수 있도록 방어벽 구성
+if [ -f /tmp/folder_mappings.txt ]; then
+    cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
+        USERS_FOR_FOLDER=$(grep "^$FOLDER:" /tmp/folder_mappings.txt | cut -d':' -f2)
+        
+        # 권한 유저 검증 조건문 생성
+        EXPR=""
+        for UNAME in $USERS_FOR_FOLDER; do
+            if [ -z "$EXPR" ]; then
+                EXPR="http.auth.user.id == '$UNAME'"
+            else
+                EXPR="$EXPR || http.auth.user.id == '$UNAME'"
+            fi
+        done
+
+        # 해당 폴더 경로로 들어왔을 때 조건 검사
+        echo "    handle /$FOLDER/* {" >> /etc/caddy/Caddyfile
+        echo "        @listens expression $EXPR" >> /etc/caddy/Caddyfile
+        echo "        handle @listens {" >> /etc/caddy/Caddyfile
+        echo "            @browser method GET HEAD" >> /etc/caddy/Caddyfile
+        echo "            file_server @browser browse" >> /etc/caddy/Caddyfile
+        echo "            webdav" >> /etc/caddy/Caddyfile
+        echo "        }" >> /etc/caddy/Caddyfile
+        # 권한이 없는 유저가 주소를 직접 치고 들어오면 국물도 없이 거부(Forbidden)
+        echo "        handle {" >> /etc/caddy/Caddyfile
+        echo "            respond \"Forbidden\" 403" >> /etc/caddy/Caddyfile
+        echo "        }" >> /etc/caddy/Caddyfile
+        echo "    }" >> /etc/caddy/Caddyfile
+    done
+fi
+
+# 최상위 루트(/) 자체에 대한 브라우저 뷰어 및 WebDAV 활성화
+echo -e "\n    handle / {" >> /etc/caddy/Caddyfile
+echo "        @browser method GET HEAD" >> /etc/caddy/Caddyfile
+echo "        file_server @browser browse" >> /etc/caddy/Caddyfile
+echo "        webdav" >> /etc/caddy/Caddyfile
+echo "    }" >> /etc/caddy/Caddyfile
+
+echo -e "\n    handle {\n        respond \"Not Found\" 404\n    }\n}" >> /etc/caddy/Caddyfile
 
 
-# 3. smb.conf 조립 (기존 기능 유지)
+# 4. smb.conf 조립 (기존 정상 스펙 유지)
 echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/samba/smb.conf
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
@@ -85,6 +116,5 @@ if [ -f /tmp/smb_folders.conf ]; then
     cat /tmp/smb_folders.conf >> /etc/samba/smb.conf
 fi
 
-# 임시 파일 정리 후 프로세스 관리자 가동
 rm -f /tmp/user_hashes.txt /tmp/folder_mappings.txt /tmp/smb_folders.conf
 exec /usr/bin/supervisord -c /etc/supervisord.conf
