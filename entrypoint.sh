@@ -57,25 +57,29 @@ echo -e "    }\n" >> /etc/caddy/Caddyfile
 # 최상위 루트 경로는 무조건 실제 데이터 저장소 지정
 echo "    root * $BASE_DIR" >> /etc/caddy/Caddyfile
 
-# 3. [핵심 수정] Caddy 내장 vars 매처를 이용해 에러 없는 완벽한 다중 권한 제어 필터 구축
+# 요청 헤더를 분석하여 일반 웹 브라우저(html 요구)인지 WebDAV 프로그램인지 완벽 분기하는 매처 정의
+echo "    @is_browser header Accept *text/html*" >> /etc/caddy/Caddyfile
+
+# 3. 하위 폴더별 권한 제어 필터 구축
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
         USERS_FOR_FOLDER=$(grep "^$FOLDER:" /tmp/folder_mappings.txt | cut -d':' -f2)
         
-        # 해당 폴더 경로 블록 선언
         echo "    handle /$FOLDER/* {" >> /etc/caddy/Caddyfile
         
-        # 권한이 있는 유저마다 각각 vars 매처와 내부 핸들러 매핑 (중복 매칭 가능)
+        # 권한이 있는 유저 인증 처리
         for UNAME in $USERS_FOR_FOLDER; do
             echo "        @allowed_$UNAME vars {http.auth.user.id} $UNAME" >> /etc/caddy/Caddyfile
             echo "        handle @allowed_$UNAME {" >> /etc/caddy/Caddyfile
-            echo "            @browser method GET HEAD" >> /etc/caddy/Caddyfile
-            echo "            file_server @browser browse" >> /etc/caddy/Caddyfile
-            echo "            webdav" >> /etc/caddy/Caddyfile
+            # 브라우저 접속이면 파일 서버 뷰어로 연결, 아니면 WebDAV 연결
+            echo "            route {" >> /etc/caddy/Caddyfile
+            echo "                file_server @is_browser browse" >> /etc/caddy/Caddyfile
+            echo "                webdav" >> /etc/caddy/Caddyfile
+            echo "            }" >> /etc/caddy/Caddyfile
             echo "        }" >> /etc/caddy/Caddyfile
         done
         
-        # 위 필터들(vars) 중 그 어디에도 해당하지 않는 타인 계정은 일괄 거부(Forbidden)
+        # 권한 없는 유저 거부 (주소를 직접 치거나 브라우저에서 눌렀을 때 작동)
         echo "        handle {" >> /etc/caddy/Caddyfile
         echo "            respond \"Forbidden\" 403" >> /etc/caddy/Caddyfile
         echo "        }" >> /etc/caddy/Caddyfile
@@ -83,17 +87,18 @@ if [ -f /tmp/folder_mappings.txt ]; then
     done
 fi
 
-# 최상위 루트(/) 자체에 대한 브라우저 뷰어 및 WebDAV 활성화
+# 최상위 루트(/) 자체에 대한 브라우저 뷰어 및 WebDAV 활성화 분기
 echo -e "\n    handle / {" >> /etc/caddy/Caddyfile
-echo "        @browser method GET HEAD" >> /etc/caddy/Caddyfile
-echo "        file_server @browser browse" >> /etc/caddy/Caddyfile
-echo "        webdav" >> /etc/caddy/Caddyfile
+echo "        route {" >> /etc/caddy/Caddyfile
+echo "            file_server @is_browser browse" >> /etc/caddy/Caddyfile
+echo "            webdav" >> /etc/caddy/Caddyfile
+echo "        }" >> /etc/caddy/Caddyfile
 echo "    }" >> /etc/caddy/Caddyfile
 
 echo -e "\n    handle {\n        respond \"Not Found\" 404\n    }\n}" >> /etc/caddy/Caddyfile
 
 
-# 4. smb.conf 조립 (기존 기능 유지)
+# 4. smb.conf 조립 (기존 정상 스펙 동일 유지)
 echo -e "[global]\n    workgroup = WORKGROUP\n    security = user\n    map to guest = Bad User\n    invalid users = root\n" > /etc/samba/smb.conf
 if [ -f /tmp/folder_mappings.txt ]; then
     cut -d':' -f1 /tmp/folder_mappings.txt | sort -u | while read -r FOLDER; do
