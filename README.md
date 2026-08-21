@@ -14,7 +14,7 @@
     volumes:
       - ./storage:/srv/share
     restart: unless-stopped
-    image: ghcr.io/eupdon/smbdav:sha-cd64314
+    image: ghcr.io/eupdon/smbdav:latest
 networks: {}
 "><pre><code>services:
   smbdav:
@@ -30,6 +30,6 @@ networks: {}
     volumes:
       - ./storage:/srv/share
     restart: unless-stopped
-    image: ghcr.io/eupdon/smbdav:sha-cd64314
+    image: ghcr.io/eupdon/smbdav:latest
 networks: {}
 </code></pre></div>
